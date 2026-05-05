@@ -1,0 +1,109 @@
+<#
+📌 Synopsis
+
+Automates the creation and deployment of a standardized performance monitoring baseline across all Active Directory Domain Controllers using Windows Performance Monitor (logman).
+
+📖 Description
+
+This PowerShell script remotely configures and starts a Performance Monitor Data Collector Set on every Domain Controller in the domain. It leverages the Active Directory module to dynamically discover Domain Controllers and uses WMI (Win32_Process) to execute commands remotely.
+
+The script performs the following steps on each Domain Controller:
+
+Ensures a logging directory exists (C:\PerfLogs\DC_Baseline)
+Creates a Data Collector Set (DC_Baseline_Monitoring) with key system and Active Directory performance counters
+Starts the Data Collector Set to begin continuous monitoring
+📊 Metrics Collected
+
+The Data Collector Set captures critical performance indicators, including:
+
+CPU utilization (% Processor Time)
+Memory availability and paging
+Disk I/O (reads/writes, free space)
+Network throughput
+Active Directory-specific counters:
+LDAP Searches/sec
+Directory Reads/sec
+Directory Writes/sec
+⚙️ Configuration Details
+Sample Interval: Every 5 minutes
+Log Format: Binary Circular (bincirc)
+Max Log Size: 500 MB
+Auto-Rotation: Every 1 hour
+Output Path: C:\PerfLogs\DC_Baseline\
+
+This ensures lightweight, continuous monitoring without excessive disk consumption.
+
+✅ Use Cases
+Establishing a baseline for Domain Controller performance
+Supporting capacity planning and trend analysis
+Troubleshooting Active Directory performance issues
+Preparing for audits or infrastructure reviews 
+#>
+
+Import-Module ActiveDirectory
+
+$logmanCreate = @'
+logman create counter DC_Baseline_Monitoring `
+  -c "\Processor(_Total)\% Processor Time" `
+     "\Memory\Available MBytes" `
+     "\Memory\Pages/sec" `
+     "\LogicalDisk(_Total)\% Free Space" `
+     "\PhysicalDisk(_Total)\Disk Reads/sec" `
+     "\PhysicalDisk(_Total)\Disk Writes/sec" `
+     "\Network Interface(*)\Bytes Total/sec" `
+     "\NTDS\LDAP Searches/sec" `
+     "\NTDS\DS Directory Reads/sec" `
+     "\NTDS\DS Directory Writes/sec" `
+  -si 00:05:00 `
+  -o "C:\PerfLogs\DC_Baseline\DC_Baseline_Monitoring" `
+  -f bincirc `
+  -max 500 `
+  -v mmddhhmm `
+  -cnf 01:00:00
+'@
+
+$logmanStart   = 'logman start DC_Baseline_Monitoring'
+$prepareFolder = 'if (!(Test-Path C:\PerfLogs\DC_Baseline)) { New-Item -ItemType Directory -Path C:\PerfLogs\DC_Baseline | Out-Null }'
+
+$DomainControllers = Get-ADDomainController -Filter * | Select-Object -ExpandProperty HostName
+
+foreach ($DC in $DomainControllers) {
+    Write-Host "`nConfiguring $DC..." -ForegroundColor Cyan
+
+    try {
+        $wmi = [WMIClass]"\\$DC\root\cimv2:Win32_Process"
+
+        # Step 1 â€” ensure log folder exists
+        $result = $wmi.Create("powershell.exe -NonInteractive -Command `"$prepareFolder`"")
+        if ($result.ReturnValue -eq 0) {
+            Write-Host "  [OK] Log folder verified on $DC"
+        }
+        else {
+            Write-Warning "  [WARN] Could not verify log folder on $DC (ReturnValue: $($result.ReturnValue))"
+        }
+
+        # Step 2 â€” create the Data Collector Set
+        $result = $wmi.Create($logmanCreate)
+        if ($result.ReturnValue -eq 0) {
+            Write-Host "  [OK] Data Collector Set created on $DC"
+        }
+        else {
+            Write-Warning "  [WARN] Collector may already exist on $DC (ReturnValue: $($result.ReturnValue))"
+        }
+
+        # Step 3 â€” start the Data Collector Set
+        $result = $wmi.Create($logmanStart)
+        if ($result.ReturnValue -eq 0) {
+            Write-Host "  [OK] Data Collector Set started on $DC"
+        }
+        else {
+            Write-Warning "  [WARN] Collector may already be running on $DC (ReturnValue: $($result.ReturnValue))"
+        }
+    }
+    catch {
+        Write-Error "Failed to contact $DC : $_"
+    }
+}
+
+Write-Host "`nDone. Review warnings above for any DCs that need attention." -ForegroundColor Cyan
+
